@@ -1,13 +1,14 @@
-version: '3'
+version: '3.9'
 
 services:
-  mysql:
-    image: mysql:8
-    command: --default-authentication-plugin=mysql_native_password
+  sql-server-db:
+    container_name: sql-server-db
+    image: mcr.microsoft.com/mssql/server:2019-latest
     environment:
-      MYSQL_ROOT_PASSWORD: "pwd"
-      MYSQL_DATABASE: "golang"
+      SA_PASSWORD: "super_PWD_go"
+      ACCEPT_EULA: "Y"
     ports:
-      - '3306:3306'
+      - "1433:1433"
     volumes:
-      - './_sql/:/docker-entrypoint-initdb.d/'
+      - './_sql/:/var/lib/mssqlql/data/'
+    # command: -c 'opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P super_PWD_go'
