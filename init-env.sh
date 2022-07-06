@@ -2,6 +2,7 @@ sudo apt-get update -y\
 && sudo apt-get upgrade -y\
 && go mod init main.go -y\
 && go get github.com/microsoft/go-mssqldb -y\
+&& go get github.com/gorilla/mux -y\
 && docker start && docker-compose up -d\
 && docker exec -it sql-server-db "bash"\
 && for query in /var/lib/mssqlql/data/*.sql\
