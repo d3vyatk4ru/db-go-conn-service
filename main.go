@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"fmt"
-	"log"
 	"net/http"
 
 	_ "github.com/microsoft/go-mssqldb"
@@ -27,22 +26,6 @@ var (
 var DSN = fmt.Sprintf("server=%s;user id=%s;password=%s;port=%d;database=%s;",
 	server, user, password, port, database)
 
-type Item struct {
-	Id          int64
-	Title       string
-	Description string
-	Updated     sql.NullString
-}
-
-type Users struct {
-	User_id  int
-	Login    string
-	Password string
-	Email    string
-	Info     string
-	Updated  sql.NullString
-}
-
 func main() {
 
 	db, err := sql.Open("sqlserver", DSN)
@@ -59,25 +42,6 @@ func main() {
 		panic(err)
 	}
 
-	rows, err := db.Query("SELECT id, title, updated FROM items")
-
-	if err != nil {
-		panic(err)
-	}
-
-	for rows.Next() {
-		post := &Item{}
-		err = rows.Scan(&post.Id, &post.Title, &post.Updated)
-
-		if err != nil {
-			panic(err)
-		}
-
-		fmt.Println(post.Id, " | ", post.Title, " | ", post.Updated.String, " |")
-	}
-
-	rows.Close()
-
 	handler, err := NewDBExplorer(db) //nolint:typecheck
 
 	if err != nil {
@@ -85,7 +49,10 @@ func main() {
 	}
 
 	fmt.Println("starting server at :8082")
-	if err := http.ListenAndServe(":8082", handler); err != nil {
-		log.Printf("error listenAndServer: %v", err)
+
+	err = http.ListenAndServe(":8082", handler)
+
+	if err != nil {
+		panic(err)
 	}
 }
