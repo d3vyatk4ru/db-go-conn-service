@@ -14,7 +14,7 @@ import (
 // // DSN = "coursera:5QPbAUufx7@tcp(localhost:3306)/coursera?charset=utf8"
 // )
 
-var (
+const (
 	server   = "localhost"
 	user     = "sa"
 	port     = 1433
