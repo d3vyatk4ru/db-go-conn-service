@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -54,12 +55,12 @@ func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
 	// send array of bytes to client
 	w.Write(
 		[]byte(
-			"The tables in db: " + tables,
+			fmt.Sprintf("The tables in db: %v", tables),
 		),
 	)
 }
 
-func (h *Handler) GetRow(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 
 	if r.Method != "GET" {
 		http.Error(w, http.StatusText(405), 405)
@@ -90,29 +91,126 @@ func (h *Handler) GetRow(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	fmt.Printf("table: %s, id: %v", table, id)
-
 	values := getColumnInfo(h.Table[idx])
 
-	rows, err := h.DB.Query(
-		fmt.Sprintf("SELECT * FROM %s WHERE %v = %v", table, h.Table[idx].Id, id),
-	)
+	err = h.
+		DB.
+		QueryRow(
+			fmt.Sprintf("USE [db_golang]; SELECT * FROM %s WHERE %s = %v", table, h.Table[idx].Id, id),
+		).
+		Scan(values...)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRow] GET '/%v/%v'. Bad query to table %v.\n Error: %v", table, vars["id"], table, err.Error()),
+			fmt.Sprintf("[GetRow] GET '/%v/%v'. Bad scanned to table %v.\n Error: %v", table, vars["id"], table, err.Error()),
 		)
 		http.Error(w, err.Error(), 500)
 		return
 	}
 
-	for rows.Next() {
-		rows.Scan(values...)
-	}
-
 	data := tranformQueryResult(values, h.Table[idx])
 
-	fmt.Println(data)
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]interface{}{
+				"records": data,
+			},
+		},
+	)
+
+	w.Write(result)
+}
+
+func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != "GET" {
+		http.Error(w, http.StatusText(405), 405)
+		return
+	}
+
+	table := mux.Vars(r)["table"]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+		log.Println(
+			fmt.Sprintf("[GetRows] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
+		)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	limit := r.FormValue("limit")
+	offset := r.FormValue("offset")
+
+	l, err := strconv.Atoi(limit)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted offset to int.\n Error: %v", table, limit, offset, err.Error()),
+		)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	o, err := strconv.Atoi(offset)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted limit to int.\n Error: %v", table, l, o, err.Error()),
+		)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	values := getColumnInfo(h.Table[idx])
+
+	rows, err := h.DB.Query(
+		fmt.Sprintf("USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %v ROWS", table, h.Table[idx].Id, offset),
+	)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
+		)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	data := make([]interface{}, 0)
+
+	for rows.Next() {
+
+		err = rows.Scan(values...)
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
+			)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		data = append(data, tranformQueryResult(values, h.Table[idx]))
+	}
+
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]interface{}{
+				"records": data,
+			},
+		},
+	)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v", table, limit, offset, err.Error()),
+		)
+		w.WriteHeader(http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(result)
 }
 
 func getColumnInfo(table TableInfo) []interface{} {
@@ -123,9 +221,7 @@ func getColumnInfo(table TableInfo) []interface{} {
 		switch field.Type {
 		case "int":
 			values[i] = new(sql.NullInt64)
-		case "nvarchar":
-			values[i] = new(sql.NullString)
-		case "text":
+		case "nvarchar", "text":
 			values[i] = new(sql.NullString)
 		}
 	}
@@ -287,29 +383,11 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 			)
 		}
 
-		// query for getting table id
-		var tableId string
-
-		row = db.QueryRow(
-			"SELECT object_id(@table)",
-			sql.Named("table", table),
-		)
-
-		err = row.Scan(&tableId)
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetTableInfo] Bad scanned table id from table %v.\nError: %v", table, err.Error()),
-			)
-
-			return nil, err
-		}
-
 		tableInfo = append(
 			tableInfo,
 			TableInfo{
 				Name:   table,
-				Id:     tableId,
+				Id:     nameId,
 				Fields: fieldInfo,
 			},
 		)
@@ -341,7 +419,8 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/", handler.TableList).Methods("GET")
-	r.HandleFunc("/{table}/{id}", handler.GetRow).Methods("GET")
+	r.HandleFunc("/{table}/{id}", handler.GetRowById).Methods("GET")
+	r.HandleFunc("/{table}", handler.GetRows).Methods("GET")
 
 	return r, nil
 }
