@@ -39,8 +39,11 @@ GO
 INSERT INTO
     [items] ([id], [title], [description], [updated])
 VALUES
-    (1,	'database/sql',	'Рассказать про базы данных',	'rvasily'),
-    (2,	'memcache',	'Рассказать про мемкеш с примером использования', NULL);
+    (1,	'database/sql',	N'Conversation about data bases', 'rvasily'),
+    (2,	'memcache',	N'Conversation about memorycache with practice example', 'rvasily'),
+    (3,	'ml/python', N'Linear regression and noise distributed', 'ddaniil'),
+    (4,	'pytorch',	N'The main topic of library', 'ddaniil'),
+    (5,	'data transfer', N'UDP and TCP protocol', NULL);
 GO
 
 IF OBJECT_ID(N'users') IS NOT NULL
@@ -60,5 +63,6 @@ GO
 INSERT INTO
     [users]([login], [password], [email], [info], [updated])
 VALUES
-    ('rvasily', 'love', 'rvasily@example.com', 'none', NULL);
+    ('rvasily', 'love', 'rvasily@example.com', 'none', NULL),
+    ('ddaniil', '9kin', 'ddaniil@example.com', 'none', NULL);
 GO
