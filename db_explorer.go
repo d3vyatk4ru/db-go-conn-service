@@ -1,18 +1,19 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"html/template"
 	"log"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"github.com/gorilla/mux"
 )
-
-type Table []string
 
 type FieldInfo struct {
 	Name  string
@@ -29,6 +30,7 @@ type TableInfo struct {
 type Handler struct {
 	DB    *sql.DB
 	Table []TableInfo
+	Tmpl  *template.Template
 }
 
 func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
@@ -75,7 +77,7 @@ func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 
 	if !cond {
 		log.Println(
-			fmt.Sprintf("[GetRow] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
+			fmt.Sprintf("[GetRowById] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
 		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -85,7 +87,7 @@ func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRow] GET '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
+			fmt.Sprintf("[GetRowById] GET '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
 		)
 		http.Error(w, err.Error(), 500)
 		return
@@ -102,7 +104,7 @@ func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRow] GET '/%v/%v'. Bad scanned to table %v.\n Error: %v", table, vars["id"], table, err.Error()),
+			fmt.Sprintf("[GetRowById] GET '/%v/%v'. Bad scanned to table %v.\n Error: %v", table, vars["id"], table, err.Error()),
 		)
 		http.Error(w, err.Error(), 500)
 		return
@@ -121,11 +123,118 @@ func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 	w.Write(result)
 }
 
-func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) tableHandler(w http.ResponseWriter, r *http.Request) {
 
-	if r.Method != "GET" {
-		http.Error(w, http.StatusText(405), 405)
+	if r.Method == "GET" && r.FormValue("limit") == "" && r.FormValue("offset") == "" {
+
+		_ = h.Tmpl.ExecuteTemplate(w, "edit.html", nil)
+
 		return
+	}
+
+	if r.Method == "GET" {
+		table := mux.Vars(r)["table"]
+
+		cond, idx, err := contains(h.Table, table)
+
+		if !cond {
+			log.Println(
+				fmt.Sprintf("[GetRows] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		limit := r.FormValue("limit")
+		offset := r.FormValue("offset")
+
+		if limit == "" && offset == "" {
+
+			limit = "5"
+			offset = "0"
+
+		}
+
+		l, err := strconv.Atoi(limit)
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad converted offset to int.\n Error: %v", table, limit, offset, err.Error()),
+			)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		o, err := strconv.Atoi(offset)
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted limit to int.\n Error: %v", table, l, o, err.Error()),
+			)
+			http.Error(w, err.Error(), 500)
+			return
+		}
+
+		values := getColumnInfo(h.Table[idx])
+
+		rows, err := h.DB.Query(
+			fmt.Sprintf("USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", table, h.Table[idx].Id, o, l),
+		)
+
+		defer rows.Close()
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
+			)
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+
+		data := make([]interface{}, 0)
+
+		for rows.Next() {
+
+			err = rows.Scan(values...)
+
+			if err != nil {
+				log.Println(
+					fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
+				)
+				http.Error(w, err.Error(), 500)
+				return
+			}
+
+			data = append(data, tranformQueryResult(values, h.Table[idx]))
+		}
+
+		result, err := json.Marshal(
+			map[string]interface{}{
+				"response": map[string]interface{}{
+					"records": data,
+				},
+			},
+		)
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v", table, limit, offset, err.Error()),
+			)
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		w.Write(result)
+	}
+}
+
+func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != "PUT" {
+		log.Println(
+			fmt.Sprintf("[CreateRecord] Bad HTTP Method. Need PUT, got %v", r.Method),
+		)
+		http.Error(w, http.StatusText(405), 405)
 	}
 
 	table := mux.Vars(r)["table"]
@@ -134,83 +243,86 @@ func (h *Handler) GetRows(w http.ResponseWriter, r *http.Request) {
 
 	if !cond {
 		log.Println(
-			fmt.Sprintf("[GetRows] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
+			fmt.Sprintf("[CreateRecord] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
 		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	limit := r.FormValue("limit")
-	offset := r.FormValue("offset")
+	item, columnForQuery, placeholder := preprareInsertData(h.Table[idx], r)
 
-	l, err := strconv.Atoi(limit)
-
-	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted offset to int.\n Error: %v", table, limit, offset, err.Error()),
-		)
-		http.Error(w, err.Error(), 500)
-		return
-	}
-
-	o, err := strconv.Atoi(offset)
+	ctx := context.Background()
+	err = h.DB.PingContext(ctx)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted limit to int.\n Error: %v", table, l, o, err.Error()),
+			fmt.Sprintf("[CreateRecord] Bad ping to db! May be db is not alive!\nError: %v", err.Error()),
 		)
-		http.Error(w, err.Error(), 500)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	values := getColumnInfo(h.Table[idx])
-
-	rows, err := h.DB.Query(
-		fmt.Sprintf("USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %v ROWS", table, h.Table[idx].Id, offset),
+	stmt, err := h.DB.Prepare(
+		fmt.Sprintf("INSERT INTO @table (%v) VALUES (%v);", columnForQuery, placeholder),
 	)
 
+	log.Println(
+		fmt.Sprintf("INSERT INTO @table (%v) VALUES (%v);", columnForQuery, placeholder),
+	)
+
+	defer stmt.Close()
+
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
-		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	data := make([]interface{}, 0)
+	_ = stmt.QueryRowContext(
+		ctx,
+		sql.Named("table", table),
+		item,
+	)
 
-	for rows.Next() {
-
-		err = rows.Scan(values...)
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
-			)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		data = append(data, tranformQueryResult(values, h.Table[idx]))
-	}
-
-	result, err := json.Marshal(
+	json, err := json.Marshal(
 		map[string]interface{}{
 			"response": map[string]interface{}{
-				"records": data,
+				"record": item,
 			},
 		},
 	)
 
-	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v", table, limit, offset, err.Error()),
-		)
-		w.WriteHeader(http.StatusInternalServerError)
-		return
+	w.Write(json)
+
+	return
+}
+
+func preprareInsertData(table TableInfo, r *http.Request) ([]interface{}, string, string) {
+
+	item := make([]interface{}, len(table.Fields))
+	columnForQuery := make([]string, len(table.Fields))
+	placeholder := make([]string, len(table.Fields))
+
+	for i, field := range table.Fields {
+
+		param := r.FormValue(field.Name)
+
+		if param != "" {
+			item[i] = param
+		} else {
+			switch field.Type {
+			case "int":
+				item[i] = 0
+			case "string", "text":
+				item[i] = ""
+			}
+		}
+
+		columnForQuery[i] = field.Name
+		placeholder[i] = fmt.Sprintf("@p%d", i+1)
 	}
 
-	w.Write(result)
+	return item, strings.Join(columnForQuery, ","), strings.Join(placeholder, ",")
+
 }
 
 func getColumnInfo(table TableInfo) []interface{} {
@@ -401,7 +513,8 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	// обращаю ваше внимание - в этом задании запрещены глобальные переменные
 
 	handler := &Handler{
-		DB: db,
+		DB:   db,
+		Tmpl: template.Must(template.ParseGlob("templates/*")),
 	}
 
 	tableInfo, err := GetTablesInfo(db)
@@ -419,8 +532,9 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/", handler.TableList).Methods("GET")
-	r.HandleFunc("/{table}/{id}", handler.GetRowById).Methods("GET")
-	r.HandleFunc("/{table}", handler.GetRows).Methods("GET")
+	r.HandleFunc("/{table}/{id:[0-9]+}", handler.GetRowById).Methods("GET")
+	r.HandleFunc("/{table}", handler.tableHandler).Methods("GET")
+	r.HandleFunc("/{table}", handler.CreateRecord).Methods("PUT")
 
 	return r, nil
 }
