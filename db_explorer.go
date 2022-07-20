@@ -309,7 +309,7 @@ func preprareInsertData(table TableInfo, r *http.Request) ([]interface{}, string
 			switch field.Type {
 			case "int":
 				item[i] = 0
-			case "string", "text":
+			case "nvarchar", "text":
 				item[i] = ""
 			}
 		}
@@ -319,7 +319,118 @@ func preprareInsertData(table TableInfo, r *http.Request) ([]interface{}, string
 	}
 
 	return item, strings.Join(columnForQuery, ","), strings.Join(placeholder, ",")
+}
 
+func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
+
+	if r.Method != "POST" {
+
+		log.Println(
+			fmt.Sprintf("[UpdateRecord] Bad HTTP Method. Need POST, got %v", r.Method),
+		)
+
+		http.Error(w, http.StatusText(405), 405)
+	}
+
+	vars := mux.Vars(r)
+
+	table := vars["table"]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+		log.Println(
+			fmt.Sprintf("[UpdateRecord] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
+		)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	id, err := strconv.Atoi(vars["id"])
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
+		)
+		http.Error(w, err.Error(), 500)
+		return
+	}
+
+	nameId, updQuery, item := preprareUpdateQuery(h.Table[idx], r)
+
+	query := fmt.Sprintf(
+		"UPDATE %v SET %v WHERE %v = %d", h.Table[idx].Name, updQuery, nameId, id,
+	)
+
+	log.Println(
+		query,
+	)
+
+	result, err := h.DB.Exec(
+		query,
+		item...,
+	)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[UpdateRecord] Bad Execute query! \nError: %v", err.Error()),
+		)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	affected, err := result.RowsAffected()
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[CreateRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
+		)
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.Write(
+		[]byte(
+			"Row affected " + fmt.Sprint(affected),
+		),
+	)
+}
+
+func preprareUpdateQuery(table TableInfo, r *http.Request) (string, string, []interface{}) {
+
+	columnQuery := make([]string, 0)
+	item := make([]interface{}, 0)
+
+	nameId := ""
+
+	var i int64 = 0
+
+	for _, field := range table.Fields {
+
+		param := r.FormValue(field.Name)
+
+		if field.IsKey {
+			nameId = field.Name
+			continue
+		}
+
+		if param != "" {
+			item = append(item, param)
+		} else {
+			switch field.Type {
+			case "int":
+				item = append(item, 0)
+			case "nvarchar", "text":
+				item = append(item, "")
+			}
+		}
+
+		columnQuery = append(columnQuery, fmt.Sprintf("%v = @p%d", field.Name, i+1))
+
+		i += 1
+	}
+
+	return nameId, strings.Join(columnQuery, ","), item
 }
 
 func getColumnInfo(table TableInfo) []interface{} {
@@ -532,6 +643,7 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	r.HandleFunc("/{table}/{id:[0-9]+}", handler.GetRowById).Methods("GET")
 	r.HandleFunc("/{table}", handler.tableHandler).Methods("GET")
 	r.HandleFunc("/{table}", handler.CreateRecord).Methods("PUT")
+	r.HandleFunc("/{table}/{id:[0-9]+}", handler.UpdateRecord).Methods("POST")
 
 	return r, nil
 }
