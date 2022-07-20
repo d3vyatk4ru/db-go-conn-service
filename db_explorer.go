@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -125,13 +124,6 @@ func (h *Handler) GetRowById(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) tableHandler(w http.ResponseWriter, r *http.Request) {
 
-	if r.Method == "GET" && r.FormValue("limit") == "" && r.FormValue("offset") == "" {
-
-		_ = h.Tmpl.ExecuteTemplate(w, "edit.html", nil)
-
-		return
-	}
-
 	if r.Method == "GET" {
 		table := mux.Vars(r)["table"]
 
@@ -177,15 +169,20 @@ func (h *Handler) tableHandler(w http.ResponseWriter, r *http.Request) {
 
 		values := getColumnInfo(h.Table[idx])
 
-		rows, err := h.DB.Query(
-			fmt.Sprintf("USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %d ROWS FETCH NEXT %d ROWS ONLY", table, h.Table[idx].Id, o, l),
+		query := fmt.Sprintf(
+			"USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
+			table, h.Table[idx].Id, o, l,
 		)
+
+		log.Println(query)
+
+		rows, err := h.DB.Query(query)
 
 		defer rows.Close()
 
 		if err != nil {
 			log.Println(
-				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
+				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, l, o, table, err.Error()),
 			)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -251,47 +248,47 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 
 	item, columnForQuery, placeholder := preprareInsertData(h.Table[idx], r)
 
-	ctx := context.Background()
-	err = h.DB.PingContext(ctx)
+	query := fmt.Sprintf(
+		"SET IDENTITY_INSERT %v ON; INSERT INTO %v (%v) VALUES (%v); SET IDENTITY_INSERT %v OFF;",
+		h.Table[idx].Name, h.Table[idx].Name, columnForQuery, placeholder, h.Table[idx].Name,
+	)
+
+	log.Println(query)
+
+	result, err := h.DB.Exec(
+		query,
+		item...,
+	)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad ping to db! May be db is not alive!\nError: %v", err.Error()),
+			fmt.Sprintf("[CreateRecord] Bad Execute query! \nError: %v", err.Error()),
 		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	stmt, err := h.DB.Prepare(
-		fmt.Sprintf("INSERT INTO @table (%v) VALUES (%v);", columnForQuery, placeholder),
-	)
-
-	log.Println(
-		fmt.Sprintf("INSERT INTO @table (%v) VALUES (%v);", columnForQuery, placeholder),
-	)
-
-	defer stmt.Close()
+	affected, err := result.RowsAffected()
 
 	if err != nil {
+		log.Println(
+			fmt.Sprintf("[CreateRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
+		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	_ = stmt.QueryRowContext(
-		ctx,
-		sql.Named("table", table),
-		item,
+	w.Write(
+		[]byte(
+			fmt.Sprintf("Rows affected %v", affected),
+		),
 	)
 
-	json, err := json.Marshal(
-		map[string]interface{}{
-			"response": map[string]interface{}{
-				"record": item,
-			},
-		},
-	)
+	id, _ := result.LastInsertId()
 
-	w.Write(json)
+	log.Println(
+		"Last insert id is:", id,
+	)
 
 	return
 }
