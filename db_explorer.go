@@ -3,7 +3,6 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -44,9 +43,7 @@ func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
 
 	tables := []string{}
 
-	for _, item := range ListTable {
-		tables = append(tables, item)
-	}
+	tables = append(tables, ListTable...)
 
 	log.Println(tables)
 
@@ -58,11 +55,19 @@ func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
+	if err != nil {
+		log.Println("Bad packed json")
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
 
 	// send array of bytes to client
-	w.Write(result)
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 }
 
 // Хендлер для получния записи / записей по id. Вызывается по эндпоинту "/{table}/{id}" [GET]
@@ -79,13 +84,10 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetRecordById] GET '/%v/%v'. Bad converted id to int.\n Error: %v",
-				table, mux.Vars(r)["id"], err.Error(),
-			))
+		log.Printf("[GetRecordById] GET '/%v/%v'. Bad converted id to int.\n Error: %v",
+			table, mux.Vars(r)["id"], err.Error())
 
 		w.WriteHeader(http.StatusBadRequest)
-
 		return
 	}
 
@@ -101,10 +103,8 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 		Scan(values...)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetRecordById] GET '/%v/%v'. Bad scanned to table %v. Error: %v",
-				h.Table[idx].Name, mux.Vars(r)["id"], table, err.Error(),
-			))
+		log.Printf("[GetRecordById] GET '/%v/%v'. Bad scanned to table %v. Error: %v",
+			h.Table[idx].Name, mux.Vars(r)["id"], table, err.Error())
 
 		result, _ := json.Marshal(
 			map[string]string{
@@ -113,7 +113,11 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 
 		w.WriteHeader(http.StatusNotFound)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(result)
+		_, err = w.Write(result)
+
+		if err != nil {
+			log.Println("Bad request")
+		}
 
 		return
 	}
@@ -128,9 +132,17 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
+	if err != nil {
+		log.Println("Bad packed json")
+	}
+
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "appliсation/json")
-	w.Write(result)
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 }
 
 // Хендлер для полуения записений из таблицы с лимитом и оффсетом.
@@ -182,13 +194,11 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 
 	rows, err := h.DB.Query(query)
 
-	defer rows.Close()
+	defer rows.Close() //nolint:staticcheck
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v",
-				table, lim, off, table, err.Error(),
-			))
+		log.Printf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v",
+			table, lim, off, table, err.Error())
 		w.WriteHeader(500)
 		return
 	}
@@ -200,10 +210,8 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 		err = rows.Scan(values...)
 
 		if err != nil {
-			log.Println(
-				fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v",
-					table, limit, offset, table, err.Error(),
-				))
+			log.Printf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v",
+				table, limit, offset, table, err.Error())
 			w.WriteHeader(500)
 			return
 		}
@@ -220,10 +228,8 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v",
-				table, limit, offset, err.Error(),
-			))
+		log.Printf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v",
+			table, limit, offset, err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -232,7 +238,11 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 
 	w.WriteHeader(http.StatusOK)
 	w.Header().Set("Content-Type", "application/json")
-	w.Write(result)
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 }
 
 // Хендлер для создания новой записи. Параметры передаются в теле.
@@ -247,7 +257,17 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	item, placeholder := MakeContainerInsert(h.Table[idx], r)
+	item, placeholder, err := MakeContainerInsert(h.Table[idx], r)
+
+	if err != nil {
+		w.WriteHeader(500)
+		_, err2 := w.Write([]byte(`{"error": "bad unpacked json"}`))
+
+		if err2 != nil {
+			log.Println("Bad request")
+		}
+	}
+
 	columns := GetColumnsTable(h.Table[idx], r, true)
 
 	query := fmt.Sprintf(
@@ -260,10 +280,7 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 	res, err := h.DB.Exec(query, item...)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad Execute query! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[CreateRecord] Bad Execute query! Error: %v", err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -271,10 +288,8 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 	LastID, err := res.LastInsertId()
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad called RowsAffected()! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[CreateRecord] Bad called RowsAffected()! Error: %v",
+			err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -284,12 +299,20 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 	result, err := json.Marshal(
 		map[string]interface{}{
 			"response": map[string]int{
-				fmt.Sprintf("%s", NameID): int(LastID),
+				NameID: int(LastID),
 			},
 		},
 	)
 
-	w.Write(result)
+	if err != nil {
+		log.Println("Bad packed json")
+	}
+
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 
 	log.Println("Inserted ID:", LastID)
 }
@@ -309,10 +332,8 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int. Error: %v",
-				table, mux.Vars(r)["id"], err.Error(),
-			))
+		log.Printf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int. Error: %v",
+			table, mux.Vars(r)["id"], err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -320,37 +341,35 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 	ColumnIdName, placeholder, item, err := CheckParamsAndTypes(h.Table[idx], r)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("Cant update %s", ColumnIdName),
-		)
-
-		result, _ := json.Marshal(
-			map[string]string{
-				"error": fmt.Sprintf("field %s have invalid type", ColumnIdName),
-			},
-		)
+		log.Printf("Cant update %s", ColumnIdName)
 
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write(result)
+		_, err2 := w.Write(
+			[]byte(
+				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, ColumnIdName),
+			),
+		)
+
+		if err2 != nil {
+			log.Println("Bad request")
+		}
 		return
 	}
 
-	log.Println("placeholder:", placeholder)
-
 	if strings.Contains(placeholder, ColumnIdName) {
 
-		log.Println(
-			fmt.Sprintf("Cant update %s", ColumnIdName),
-		)
-
-		result, _ := json.Marshal(
-			map[string]string{
-				"error": fmt.Sprintf("field %s have invalid type", ColumnIdName),
-			},
-		)
+		log.Printf("Cant update %s", ColumnIdName)
 
 		w.WriteHeader(http.StatusBadRequest)
-		w.Write(result)
+		_, err2 := w.Write(
+			[]byte(
+				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, ColumnIdName),
+			),
+		)
+
+		if err2 != nil {
+			log.Println("Bad request")
+		}
 		return
 	}
 
@@ -364,10 +383,8 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 	res, err := h.DB.Exec(query, item...)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad Execute query! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[UpdateRecord] Bad Execute query! Error: %v",
+			err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -375,10 +392,8 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 	affected, err := res.RowsAffected()
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad called RowsAffected()! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[UpdateRecord] Bad called RowsAffected()! Error: %v",
+			err.Error())
 		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
@@ -391,7 +406,15 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
-	w.Write(result)
+	if err != nil {
+		log.Println("Bad packed json")
+	}
+
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 
 	log.Println("Row affected:", affected)
 }
@@ -410,10 +433,8 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[DeleteRecord] DELETE '/%v/%v'. Bad converted id to int. Error: %v",
-				table, mux.Vars(r)["id"], err.Error(),
-			))
+		log.Printf("[DeleteRecord] DELETE '/%v/%v'. Bad converted id to int. Error: %v",
+			table, mux.Vars(r)["id"], err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -429,9 +450,7 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 	res, err := h.DB.Exec(query)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[DeleteRecord] Bad Execute query! Error: %v", err.Error()),
-		)
+		log.Printf("[DeleteRecord] Bad Execute query! Error: %v", err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
@@ -439,9 +458,7 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 	affected, err := res.RowsAffected()
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[DeleteRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
-		)
+		log.Printf("[DeleteRecord] Bad called RowsAffected()! \nError: %v", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
@@ -456,7 +473,13 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 
 	log.Println(result)
 
-	w.Write(result)
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	_, err = w.Write(result)
+
+	if err != nil {
+		log.Println("Bad request")
+	}
 }
 
 // Возвращаем имя столбца, который явл. ID
@@ -479,20 +502,18 @@ func CheckTableExist(w http.ResponseWriter, tableInfo []TableInfo, table string,
 
 	if !cond {
 
-		result, _ := json.Marshal(
-			map[string]string{
-				"error": "unknown table",
-			},
-		)
-
 		w.WriteHeader(http.StatusNotFound)
 		w.Header().Set("Content-Type", "application/json")
-		w.Write(result)
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
 
-		log.Println(
-			fmt.Sprintf("[%s] Bad table in endpoint! Table %v is not exist!\nError: %v",
-				funcName, table, err.Error(),
-			))
+		if err2 != nil {
+			log.Panicln("Bad packed json")
+		}
+
+		log.Printf("[%s] Bad table in endpoint! Table %v is not exist!\nError: %v",
+			funcName, table, err.Error())
 
 		return -1, err
 	}
@@ -508,7 +529,7 @@ func contains(s []TableInfo, table string) (bool, int, error) {
 		}
 	}
 
-	return false, -1, errors.New(
+	return false, -1, fmt.Errorf(
 		fmt.Sprintf("The database not contain table %v", table),
 	)
 }
@@ -533,14 +554,19 @@ func GetColumnsTable(table TableInfo, r *http.Request, key bool) string {
 }
 
 // Создаем контейнер для записи значений из БД и плейсхолдер
-func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, string) {
+func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, string, error) {
 
 	item := make([]interface{}, 0)
 	placeholder := make([]string, 0)
 
 	decoder := json.NewDecoder(r.Body)
 	param := make(map[string]interface{}, len(table.Fields))
-	decoder.Decode(&param)
+	err := decoder.Decode(&param)
+
+	if err != nil {
+		log.Println("Bad decode json data")
+		return make([]interface{}, 0), "", fmt.Errorf("Bad decode json")
+	}
 
 	for _, field := range table.Fields {
 
@@ -566,7 +592,7 @@ func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, strin
 		placeholder = append(placeholder, "?")
 	}
 
-	return item, strings.Join(placeholder, ",")
+	return item, strings.Join(placeholder, ","), nil
 }
 
 // Проверка типов параметров, которые пришли в реквесте. Делаем placeholders
@@ -579,7 +605,12 @@ func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []in
 
 	decoder := json.NewDecoder(r.Body)
 	param := make(map[string]interface{}, len(table.Fields))
-	decoder.Decode(&param)
+	err := decoder.Decode(&param)
+
+	if err != nil {
+		log.Println("Bad decode json data")
+		return "", "", make([]interface{}, 0), fmt.Errorf("Bad decode json")
+	}
 
 	for _, field := range table.Fields {
 
@@ -687,7 +718,7 @@ func GetAllTables(db *sql.DB) ([]string, error) {
 			table_schema = 'golang';`)
 
 	//auto close after returns
-	defer rows.Close()
+	defer rows.Close() //nolint:staticcheck
 
 	if err != nil {
 		log.Fatal("[GetAllTables] Bad query to db!\nError: ", err.Error())
@@ -720,10 +751,8 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 	ListTable, err := GetAllTables(db)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[GetTableInfo]. Bad calling from [GetAllTables] function! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[GetTableInfo]. Bad calling from [GetAllTables] function! Error: %v",
+			err.Error())
 
 		return nil, err
 	}
@@ -751,10 +780,8 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 		err := row.Scan(&nameId)
 
 		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetTableInfo] Bad scanned column id from table %v. Error: %v",
-					table, err.Error(),
-				))
+			log.Printf("[GetTableInfo] Bad scanned column id from table %v. Error: %v",
+				table, err.Error())
 			return nil, err
 		}
 
@@ -773,10 +800,8 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 		)
 
 		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetTableInfo] Bad query to table %v. COLUMN_NAME, DATA_TYPE, IS_NULLABLE! Error: %v",
-					table, err.Error(),
-				))
+			log.Printf("[GetTableInfo] Bad query to table %v. COLUMN_NAME, DATA_TYPE, IS_NULLABLE! Error: %v",
+				table, err.Error())
 
 			return nil, err
 		}
@@ -791,10 +816,8 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 			err = rows.Scan(&fieldName, &fieldType, &fieldNull)
 
 			if err != nil {
-				log.Println(
-					fmt.Sprintf("[GetTableInfo] Bad scanned COLUMN_NAME and DATA_TYPE from %v! Error: %v",
-						table, err.Error(),
-					))
+				log.Printf("[GetTableInfo] Bad scanned COLUMN_NAME and DATA_TYPE from %v! Error: %v",
+					table, err.Error())
 
 				return nil, err
 			}
@@ -844,10 +867,8 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	tableInfo, err := GetTablesInfo(db)
 
 	if err != nil {
-		log.Println(
-			fmt.Sprintf("[NewDBExplorer] Bad calling from [GetTablesInfo] function! Error: %v",
-				err.Error(),
-			))
+		log.Printf("[NewDBExplorer] Bad calling from [GetTablesInfo] function! Error: %v",
+			err.Error())
 
 		return nil, err
 	}
