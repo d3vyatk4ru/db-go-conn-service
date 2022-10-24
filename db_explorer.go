@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html/template"
 	"log"
 	"net/http"
 	"strconv"
@@ -15,103 +14,202 @@ import (
 )
 
 type FieldInfo struct {
-	Name  string
-	Type  string
-	IsKey bool
+	Name       string
+	ColumnType string
+	IsKey      bool
+	CouldNull  bool
 }
 
 type TableInfo struct {
 	Name   string
-	Id     string
+	ID     string
 	Fields []FieldInfo
 }
 
 type Handler struct {
 	DB    *sql.DB
 	Table []TableInfo
-	Tmpl  *template.Template
 }
 
+// Хендлер для списка всех таблиц. Вызывается по эндпоинту "/" [GET]
 func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
-
-	if r.Method != "GET" {
-		http.Error(w, http.StatusText(405), 405)
-		return
-	}
 
 	ListTable, err := GetAllTables(h.DB)
 
 	if err != nil {
-		log.Fatal("[GetRow] GET '/'.\n Error: ", err.Error())
+		log.Fatal("[TableList] GET '/'.\n Error: ", err.Error())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	tables := ""
+	tables := []string{}
 
 	for _, item := range ListTable {
-		tables += item + " "
+		tables = append(tables, item)
 	}
 
-	resp := fmt.Sprintf("The tables in db: %v", tables)
+	log.Println(tables)
 
-	log.Println(resp)
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string][]string{
+				"tables": tables,
+			},
+		},
+	)
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
 
 	// send array of bytes to client
-	w.Write(
-		[]byte(resp),
-	)
+	w.Write(result)
 }
 
-func (h *Handler) GetRecordById(w http.ResponseWriter, r *http.Request) {
+// Хендлер для получния записи / записей по id. Вызывается по эндпоинту "/{table}/{id}" [GET]
+func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 
-	if r.Method != "GET" {
-		http.Error(w, http.StatusText(405), 405)
+	table := mux.Vars(r)["table"]
+
+	idx, err := CheckTableExist(w, h.Table, table, "GetRecordById")
+
+	if err != nil {
 		return
 	}
 
-	vars := mux.Vars(r)
-
-	table := vars["table"]
-
-	cond, idx, err := contains(h.Table, table)
-
-	if !cond {
-		log.Println(
-			fmt.Sprintf("[GetRowById] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	id, err := strconv.Atoi(vars["id"])
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRowById] GET '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
-		)
-		http.Error(w, err.Error(), 500)
+			fmt.Sprintf("[GetRecordById] GET '/%v/%v'. Bad converted id to int.\n Error: %v",
+				table, mux.Vars(r)["id"], err.Error(),
+			))
+
+		w.WriteHeader(http.StatusBadRequest)
+
 		return
 	}
 
-	values := getColumnInfo(h.Table[idx])
+	values := ColumnsType(h.Table[idx])
 
-	err = h.
-		DB.
+	columns := GetColumnsTable(h.Table[idx], r, false)
+
+	err = h.DB.
 		QueryRow(
-			fmt.Sprintf("USE [db_golang]; SELECT * FROM %s WHERE %s = %v", h.Table[idx].Name, h.Table[idx].Id, id),
+			fmt.Sprintf("SELECT %s FROM %s WHERE %s = %v",
+				columns, h.Table[idx].Name, h.Table[idx].ID, id),
 		).
 		Scan(values...)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetRowById] GET '/%v/%v'. Bad scanned to table %v.\n Error: %v", h.Table[idx].Name, vars["id"], table, err.Error()),
-		)
-		http.Error(w, err.Error(), 500)
+			fmt.Sprintf("[GetRecordById] GET '/%v/%v'. Bad scanned to table %v. Error: %v",
+				h.Table[idx].Name, mux.Vars(r)["id"], table, err.Error(),
+			))
+
+		result, _ := json.Marshal(
+			map[string]string{
+				"error": "record not found",
+			})
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(result)
+
 		return
 	}
 
-	data := tranformQueryResult(values, h.Table[idx])
+	data := CastType(values, h.Table[idx])
+
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]interface{}{
+				"record": data,
+			},
+		},
+	)
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "appliсation/json")
+	w.Write(result)
+}
+
+// Хендлер для полуения записений из таблицы с лимитом и оффсетом.
+// Вызывается по эндпоинту "/{table}&offset=a&limit=b" [GET]
+func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
+
+	table := mux.Vars(r)["table"]
+
+	idx, err := CheckTableExist(w, h.Table, table, "GetRecordById")
+
+	if err != nil {
+		return
+	}
+
+	limit := r.FormValue("limit")
+
+	if limit == "" {
+		limit = "5"
+	}
+
+	lim, err := strconv.Atoi(limit)
+	if err != nil {
+		lim = 5
+	}
+
+	offset := r.FormValue("offset")
+
+	if offset == "" {
+		offset = "0"
+	}
+
+	off, err := strconv.Atoi(offset)
+	if err != nil {
+		off = 0
+	}
+
+	values := ColumnsType(h.Table[idx])
+
+	columns := GetColumnsTable(h.Table[idx], r, false)
+
+	log.Println("columns: ", columns)
+
+	query := fmt.Sprintf(
+		"SELECT %s FROM %v ORDER BY %v LIMIT %d, %d",
+		columns, h.Table[idx].Name, h.Table[idx].ID, off, lim,
+	)
+
+	log.Println(query)
+
+	rows, err := h.DB.Query(query)
+
+	defer rows.Close()
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v",
+				table, lim, off, table, err.Error(),
+			))
+		w.WriteHeader(500)
+		return
+	}
+
+	data := make([]interface{}, 0)
+
+	for rows.Next() {
+
+		err = rows.Scan(values...)
+
+		if err != nil {
+			log.Println(
+				fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v",
+					table, limit, offset, table, err.Error(),
+				))
+			w.WriteHeader(500)
+			return
+		}
+
+		data = append(data, CastType(values, h.Table[idx]))
+	}
 
 	result, err := json.Marshal(
 		map[string]interface{}{
@@ -121,304 +219,206 @@ func (h *Handler) GetRecordById(w http.ResponseWriter, r *http.Request) {
 		},
 	)
 
-	log.Println(result)
-
-	w.Write(result)
-}
-
-func (h *Handler) tableHandler(w http.ResponseWriter, r *http.Request) {
-
-	if r.Method == "GET" {
-
-		table := mux.Vars(r)["table"]
-
-		cond, idx, err := contains(h.Table, table)
-
-		if !cond {
-			log.Println(
-				fmt.Sprintf("[GetRows] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
-			)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		limit := r.FormValue("limit")
-		offset := r.FormValue("offset")
-
-		if limit == "" && offset == "" {
-
-			limit = "5"
-			offset = "0"
-
-		}
-
-		l, err := strconv.Atoi(limit)
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad converted offset to int.\n Error: %v", table, limit, offset, err.Error()),
-			)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		o, err := strconv.Atoi(offset)
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetRow] GET '/%v?limit=%v&offfset=%v'. Bad converted limit to int.\n Error: %v", table, l, o, err.Error()),
-			)
-			http.Error(w, err.Error(), 500)
-			return
-		}
-
-		values := getColumnInfo(h.Table[idx])
-
-		query := fmt.Sprintf(
-			"USE [db_golang]; SELECT * FROM %v ORDER BY %v OFFSET %d ROWS FETCH NEXT %d ROWS ONLY",
-			h.Table[idx].Name, h.Table[idx].Id, o, l,
-		)
-
-		log.Println(query)
-
-		rows, err := h.DB.Query(query)
-
-		defer rows.Close()
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad query to table %v.\n Error: %v", table, l, o, table, err.Error()),
-			)
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-
-		data := make([]interface{}, 0)
-
-		for rows.Next() {
-
-			err = rows.Scan(values...)
-
-			if err != nil {
-				log.Println(
-					fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad scanned to table %v.\n Error: %v", table, limit, offset, table, err.Error()),
-				)
-				http.Error(w, err.Error(), 500)
-				return
-			}
-
-			data = append(data, tranformQueryResult(values, h.Table[idx]))
-		}
-
-		result, err := json.Marshal(
-			map[string]interface{}{
-				"response": map[string]interface{}{
-					"records": data,
-				},
-			},
-		)
-
-		if err != nil {
-			log.Println(
-				fmt.Sprintf("[GetRows] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v", table, limit, offset, err.Error()),
-			)
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		log.Println(data)
-
-		w.Write(result)
-	}
-}
-
-func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
-
-	if r.Method != "PUT" {
+	if err != nil {
 		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad HTTP Method. Need PUT, got %v", r.Method),
-		)
-		http.Error(w, http.StatusText(405), 405)
-	}
-
-	table := mux.Vars(r)["table"]
-
-	cond, idx, err := contains(h.Table, table)
-
-	if !cond {
-		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[TableContain] GET '/%v?limit=%v&offfset=%v'. Bad json marshal.\n Error: %v",
+				table, limit, offset, err.Error(),
+			))
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	item, columnForQuery, placeholder := preprareInsertData(h.Table[idx], r)
+	log.Println(data)
+
+	w.WriteHeader(http.StatusOK)
+	w.Header().Set("Content-Type", "application/json")
+	w.Write(result)
+}
+
+// Хендлер для создания новой записи. Параметры передаются в теле.
+// Вызывается по эндпоинту "/{table}" [PUT]
+func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
+
+	table := mux.Vars(r)["table"]
+
+	idx, err := CheckTableExist(w, h.Table, table, "CreateRecord")
+
+	if err != nil {
+		return
+	}
+
+	item, placeholder := MakeContainerInsert(h.Table[idx], r)
+	columns := GetColumnsTable(h.Table[idx], r, true)
 
 	query := fmt.Sprintf(
-		"SET IDENTITY_INSERT %v ON; INSERT INTO %v (%v) VALUES (%v); SET IDENTITY_INSERT %v OFF;",
-		h.Table[idx].Name, h.Table[idx].Name, columnForQuery, placeholder, h.Table[idx].Name,
+		"INSERT INTO %v (%v) VALUES (%v);",
+		h.Table[idx].Name, columns, placeholder,
 	)
 
 	log.Println(query)
 
-	result, err := h.DB.Exec(
-		query,
-		item...,
-	)
+	res, err := h.DB.Exec(query, item...)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad Execute query! \nError: %v", err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[CreateRecord] Bad Execute query! Error: %v",
+				err.Error(),
+			))
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	affected, err := result.RowsAffected()
+	LastID, err := res.LastInsertId()
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[CreateRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[CreateRecord] Bad called RowsAffected()! Error: %v",
+				err.Error(),
+			))
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	w.Write(
-		[]byte(
-			fmt.Sprintf("Rows affected %v", affected),
-		),
+	NameID := GetIdColumnName(h.Table[idx])
+
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]int{
+				fmt.Sprintf("%s", NameID): int(LastID),
+			},
+		},
 	)
 
-	log.Println(
-		"Inserted: ", item,
-	)
+	w.Write(result)
 
-	return
+	log.Println("Inserted ID:", LastID)
 }
 
+// Хендлер для обновлени существующей записи по ID. Параметры передаются в теле.
+// Вызывается по эндпоинту "/{table}/{id}". [POST]
 func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 
-	if r.Method != "POST" {
+	table := mux.Vars(r)["table"]
 
-		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad HTTP Method. Need POST, got %v", r.Method),
-		)
+	idx, err := CheckTableExist(w, h.Table, table, "UpdateRecord")
 
-		http.Error(w, http.StatusText(405), 405)
-	}
-
-	vars := mux.Vars(r)
-
-	table := vars["table"]
-
-	cond, idx, err := contains(h.Table, table)
-
-	if !cond {
-		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err != nil {
 		return
 	}
 
-	id, err := strconv.Atoi(vars["id"])
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
-		)
-		http.Error(w, err.Error(), 500)
+			fmt.Sprintf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int. Error: %v",
+				table, mux.Vars(r)["id"], err.Error(),
+			))
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	nameId, updQuery, item := preprareUpdateQuery(h.Table[idx], r)
+	ColumnIdName, placeholder, item, err := CheckParamsAndTypes(h.Table[idx], r)
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("Cant update %s", ColumnIdName),
+		)
+
+		result, _ := json.Marshal(
+			map[string]string{
+				"error": fmt.Sprintf("field %s have invalid type", ColumnIdName),
+			},
+		)
+
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(result)
+		return
+	}
+
+	log.Println("placeholder:", placeholder)
+
+	if strings.Contains(placeholder, ColumnIdName) {
+
+		log.Println(
+			fmt.Sprintf("Cant update %s", ColumnIdName),
+		)
+
+		result, _ := json.Marshal(
+			map[string]string{
+				"error": fmt.Sprintf("field %s have invalid type", ColumnIdName),
+			},
+		)
+
+		w.WriteHeader(http.StatusBadRequest)
+		w.Write(result)
+		return
+	}
 
 	query := fmt.Sprintf(
-		"UPDATE %v SET %v WHERE %v = %d", h.Table[idx].Name, updQuery, nameId, id,
+		"UPDATE %v SET %v WHERE %v = %d",
+		h.Table[idx].Name, placeholder, ColumnIdName, id,
 	)
 
-	log.Println(
-		query,
-	)
+	log.Println(query)
 
-	result, err := h.DB.Exec(
-		query,
-		item...,
-	)
+	res, err := h.DB.Exec(query, item...)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad Execute query! \nError: %v", err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[UpdateRecord] Bad Execute query! Error: %v",
+				err.Error(),
+			))
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	affected, err := result.RowsAffected()
+	affected, err := res.RowsAffected()
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[UpdateRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[UpdateRecord] Bad called RowsAffected()! Error: %v",
+				err.Error(),
+			))
+		w.WriteHeader(http.StatusInternalServerError)
 		return
 	}
 
-	resp := "Row affected " + fmt.Sprint(affected) + "\n" +
-		"Record with id = " + fmt.Sprint(id) + "was updated"
-
-	log.Println(resp)
-
-	w.Write(
-		[]byte(resp),
+	result, err := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]int{
+				"updated": int(affected),
+			},
+		},
 	)
+
+	w.Write(result)
+
+	log.Println("Row affected:", affected)
 }
 
-func (h *Handler) DeleteRecordById(w http.ResponseWriter, r *http.Request) {
+// Хендлер для удлаения записи по ID. Вызывается по эндпоинту "/{table}/{id}". [DELETE]
+func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 
-	if r.Method != "DELETE" {
-		log.Println(
-			fmt.Sprintf("[DeleteRecordById] Bad HTTP Method. Need DELETE, got %v", r.Method),
-		)
+	table := mux.Vars(r)["table"]
 
-		http.Error(w, http.StatusText(405), 405)
-	}
+	idx, err := CheckTableExist(w, h.Table, table, "DeleteRecord")
 
-	vars := mux.Vars(r)
-
-	table := vars["table"]
-
-	cond, idx, err := contains(h.Table, table)
-
-	if !cond {
-		log.Println(
-			fmt.Sprintf("[DeleteRecordById] Bad table in endpoint! Table %v is not exist!\nError: %v", table, err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+	if err != nil {
 		return
 	}
 
-	id, err := strconv.Atoi(vars["id"])
+	id, err := strconv.Atoi(mux.Vars(r)["id"])
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[DeleteRecordById] DELETE '/%v/%v'. Bad converted id to int.\n Error: %v", table, vars["id"], err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
+			fmt.Sprintf("[DeleteRecord] DELETE '/%v/%v'. Bad converted id to int. Error: %v",
+				table, mux.Vars(r)["id"], err.Error(),
+			))
+		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	var NameID string = ""
-
-	for _, field := range h.Table[idx].Fields {
-
-		if field.IsKey {
-			NameID = field.Name
-		}
-
-	}
+	NameID := GetIdColumnName(h.Table[idx])
 
 	query := fmt.Sprintf(
 		"DELETE FROM %v WHERE %v = %d", h.Table[idx].Name, NameID, id,
@@ -426,110 +426,214 @@ func (h *Handler) DeleteRecordById(w http.ResponseWriter, r *http.Request) {
 
 	log.Println(query)
 
-	result, err := h.DB.Exec(query)
+	res, err := h.DB.Exec(query)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[DeleteRecordById] Bad Execute query! \nError: %v", err.Error()),
+			fmt.Sprintf("[DeleteRecord] Bad Execute query! Error: %v", err.Error()),
+		)
+		w.WriteHeader(http.StatusBadRequest)
+		return
+	}
+
+	affected, err := res.RowsAffected()
+
+	if err != nil {
+		log.Println(
+			fmt.Sprintf("[DeleteRecord] Bad called RowsAffected()! \nError: %v", err.Error()),
 		)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 
-	affected, err := result.RowsAffected()
-
-	if err != nil {
-		log.Println(
-			fmt.Sprintf("[DeleteRecordById] Bad called RowsAffected()! \nError: %v", err.Error()),
-		)
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
-	resp := "Row affected " + fmt.Sprint(affected) + "\n" +
-		"Record with id = " + fmt.Sprint(id) + "was deleted"
-
-	log.Println(resp)
-
-	w.Write(
-		[]byte(resp),
+	result, _ := json.Marshal(
+		map[string]interface{}{
+			"response": map[string]int{
+				"deleted": int(affected),
+			},
+		},
 	)
+
+	log.Println(result)
+
+	w.Write(result)
 }
 
-func preprareInsertData(table TableInfo, r *http.Request) ([]interface{}, string, string) {
-
-	item := make([]interface{}, len(table.Fields))
-	columnForQuery := make([]string, len(table.Fields))
-	placeholder := make([]string, len(table.Fields))
-
-	for i, field := range table.Fields {
-
-		param := r.FormValue(field.Name)
-
-		if param != "" {
-			item[i] = param
-		} else {
-			switch field.Type {
-			case "int":
-				item[i] = 0
-			case "nvarchar", "text":
-				item[i] = ""
-			}
-		}
-
-		columnForQuery[i] = field.Name
-		placeholder[i] = fmt.Sprintf("@p%d", i+1)
-	}
-
-	return item, strings.Join(columnForQuery, ","), strings.Join(placeholder, ",")
-}
-
-func preprareUpdateQuery(table TableInfo, r *http.Request) (string, string, []interface{}) {
-
-	columnQuery := make([]string, 0)
-	item := make([]interface{}, 0)
-
-	nameId := ""
-
-	var i int64 = 0
+// Возвращаем имя столбца, который явл. ID
+func GetIdColumnName(table TableInfo) string {
 
 	for _, field := range table.Fields {
 
-		param := r.FormValue(field.Name)
-
 		if field.IsKey {
-			nameId = field.Name
-			continue
+			return field.Name
 		}
+	}
 
-		if param != "" {
-			item = append(item, param)
-		} else {
-			switch field.Type {
-			case "int":
-				item = append(item, 0)
-			case "nvarchar", "text":
-				item = append(item, "")
+	return ""
+}
+
+// Проверка наличия таблицы в БД и отправка ошибки
+func CheckTableExist(w http.ResponseWriter, tableInfo []TableInfo, table string, funcName string) (int, error) {
+
+	cond, idx, err := contains(tableInfo, table)
+
+	if !cond {
+
+		result, _ := json.Marshal(
+			map[string]string{
+				"error": "unknown table",
+			},
+		)
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write(result)
+
+		log.Println(
+			fmt.Sprintf("[%s] Bad table in endpoint! Table %v is not exist!\nError: %v",
+				funcName, table, err.Error(),
+			))
+
+		return -1, err
+	}
+
+	return idx, nil
+}
+
+// Проверка наличия конкретной таблицы
+func contains(s []TableInfo, table string) (bool, int, error) {
+	for idx, v := range s {
+		if v.Name == table {
+			return true, idx, nil
+		}
+	}
+
+	return false, -1, errors.New(
+		fmt.Sprintf("The database not contain table %v", table),
+	)
+}
+
+// Смотрим имена столбцов в таблице
+func GetColumnsTable(table TableInfo, r *http.Request, key bool) string {
+
+	columns := make([]string, 0)
+
+	for _, field := range table.Fields {
+
+		if key {
+			if field.IsKey {
+				continue
 			}
 		}
 
-		columnQuery = append(columnQuery, fmt.Sprintf("%v = @p%d", field.Name, i+1))
-
-		i += 1
+		columns = append(columns, field.Name)
 	}
 
-	return nameId, strings.Join(columnQuery, ","), item
+	return strings.Join(columns, ",")
 }
 
-func getColumnInfo(table TableInfo) []interface{} {
+// Создаем контейнер для записи значений из БД и плейсхолдер
+func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, string) {
+
+	item := make([]interface{}, 0)
+	placeholder := make([]string, 0)
+
+	decoder := json.NewDecoder(r.Body)
+	param := make(map[string]interface{}, len(table.Fields))
+	decoder.Decode(&param)
+
+	for _, field := range table.Fields {
+
+		if field.IsKey {
+			continue
+		}
+
+		if param[field.Name] != nil {
+			item = append(item, param[field.Name])
+		} else {
+			if field.CouldNull {
+				item = append(item, nil)
+			} else {
+				switch field.ColumnType {
+				case "int":
+					item = append(item, 0)
+				case "varchar", "text":
+					item = append(item, "")
+				}
+			}
+		}
+
+		placeholder = append(placeholder, "?")
+	}
+
+	return item, strings.Join(placeholder, ",")
+}
+
+// Проверка типов параметров, которые пришли в реквесте. Делаем placeholders
+func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []interface{}, error) {
+
+	var columnIdName string
+
+	item := make([]interface{}, 0)
+	placeholder := make([]string, 0)
+
+	decoder := json.NewDecoder(r.Body)
+	param := make(map[string]interface{}, len(table.Fields))
+	decoder.Decode(&param)
+
+	for _, field := range table.Fields {
+
+		if field.IsKey {
+			columnIdName = field.Name
+			break
+		}
+	}
+
+	for key, val := range param {
+
+		for _, field := range table.Fields {
+
+			if field.Name == key {
+
+				if val == nil && !field.CouldNull {
+					return field.Name, "", make([]interface{}, 0), fmt.Errorf("%s column cant use this type", field.Name)
+				}
+
+				switch val.(type) {
+
+				case string:
+
+					if field.ColumnType != "varchar" && field.ColumnType != "text" {
+						return field.Name, "", make([]interface{}, 0), fmt.Errorf("%s column cant use this type", field.Name)
+					}
+
+				case float64:
+					if field.ColumnType != "int" {
+						return field.Name, "", make([]interface{}, 0), fmt.Errorf("%s column cant use this type", field.Name)
+					}
+				}
+			}
+		}
+
+		item = append(item, val)
+
+		placeholder = append(placeholder, fmt.Sprintf("%v = ?", key))
+	}
+
+	return columnIdName, strings.Join(placeholder, ","), item, nil
+}
+
+// Возвращаем интерфейс с подготовленными типами для
+// чтения записи из таблицы table
+func ColumnsType(table TableInfo) []interface{} {
 
 	values := make([]interface{}, len(table.Fields))
 
 	for i, field := range table.Fields {
-		switch field.Type {
+		switch field.ColumnType {
 		case "int":
 			values[i] = new(sql.NullInt64)
-		case "nvarchar", "text":
+		case "varchar", "text":
 			values[i] = new(sql.NullString)
 		}
 	}
@@ -537,11 +641,12 @@ func getColumnInfo(table TableInfo) []interface{} {
 	return values
 }
 
-func tranformQueryResult(row []interface{}, table TableInfo) map[string]interface{} {
+// Делаем каст к гошным типам
+func CastType(record []interface{}, table TableInfo) map[string]interface{} {
 
-	item := make(map[string]interface{}, len(row))
+	item := make(map[string]interface{}, len(record))
 
-	for idx, value := range row {
+	for idx, value := range record {
 
 		switch value.(type) {
 
@@ -567,24 +672,19 @@ func tranformQueryResult(row []interface{}, table TableInfo) map[string]interfac
 	return item
 }
 
-func contains(s []TableInfo, table string) (bool, int, error) {
-	for idx, v := range s {
-		if v.Name == table {
-			return true, idx, nil
-		}
-	}
-
-	return false, -1, errors.New(
-		fmt.Sprintf("The database not contain table %v", table),
-	)
-}
-
+// Информация о все таблицах в БД
 func GetAllTables(db *sql.DB) ([]string, error) {
 
 	ListTable := make([]string, 0)
 
 	// make request to db. Get all tables name
-	rows, err := db.Query("USE [db_golang]; SELECT TABLE_NAME FROM INFORMATION_SCHEMA.TABLES;")
+	rows, err := db.Query(`
+		SELECT
+			Table_name
+		FROM
+			information_schema.tables
+		WHERE
+			table_schema = 'golang';`)
 
 	//auto close after returns
 	defer rows.Close()
@@ -612,6 +712,7 @@ func GetAllTables(db *sql.DB) ([]string, error) {
 	return ListTable, nil
 }
 
+// Получение информации о всех столбцах таблицы
 func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 
 	tableInfo := []TableInfo{}
@@ -620,8 +721,9 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[GetTableInfo]. Bad calling from [GetAllTables] function!\nError: %v", err.Error()),
-		)
+			fmt.Sprintf("[GetTableInfo]. Bad calling from [GetAllTables] function! Error: %v",
+				err.Error(),
+			))
 
 		return nil, err
 	}
@@ -632,31 +734,49 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 
 		var nameId string
 
-		// query to getting name of PK column
 		row := db.QueryRow(
-			"SELECT K.COLUMN_NAME FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS T JOIN INFORMATION_SCHEMA.KEY_COLUMN_USAGE K ON K.CONSTRAINT_NAME=T.CONSTRAINT_NAME WHERE K.TABLE_NAME=@table AND T.CONSTRAINT_TYPE='PRIMARY KEY';",
-			sql.Named("table", table),
+			fmt.Sprintf(
+				`SELECT
+				   	COLUMN_NAME 
+				 FROM
+				   	INFORMATION_SCHEMA.COLUMNS
+				 WHERE
+				 	TABLE_SCHEMA = 'golang' AND
+					TABLE_NAME = '%s' AND
+					COLUMN_KEY = 'PRI'`,
+				table,
+			),
 		)
 
 		err := row.Scan(&nameId)
 
 		if err != nil {
 			log.Println(
-				fmt.Sprintf("[GetTableInfo] Bad scanned column id from table %v .\nError: %v", table, err.Error()),
-			)
+				fmt.Sprintf("[GetTableInfo] Bad scanned column id from table %v. Error: %v",
+					table, err.Error(),
+				))
 			return nil, err
 		}
 
 		// make query for getting column name and column type into $table
 		rows, err := db.Query(
-			"SELECT COLUMN_NAME, DATA_TYPE FROM INFORMATION_SCHEMA.COLUMNS WHERE TABLE_NAME = @table",
-			sql.Named("table", table),
+			fmt.Sprintf(
+				`SELECT
+					COLUMN_NAME, DATA_TYPE , IS_NULLABLE
+		  		 FROM
+					INFORMATION_SCHEMA.COLUMNS 
+		  		 WHERE
+					TABLE_SCHEMA = 'golang' AND
+					TABLE_NAME = '%s'`,
+				table,
+			),
 		)
 
 		if err != nil {
 			log.Println(
-				fmt.Sprintf("[GetTableInfo] Bad query to table %v. COLUMN_NAME and DATA_TYPE!\nError: %v", table, err.Error()),
-			)
+				fmt.Sprintf("[GetTableInfo] Bad query to table %v. COLUMN_NAME, DATA_TYPE, IS_NULLABLE! Error: %v",
+					table, err.Error(),
+				))
 
 			return nil, err
 		}
@@ -665,14 +785,16 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 
 			var fieldName string = ""
 			var fieldType string = ""
+			var fieldNull string = ""
 			var isKey bool = false
 
-			err = rows.Scan(&fieldName, &fieldType)
+			err = rows.Scan(&fieldName, &fieldType, &fieldNull)
 
 			if err != nil {
 				log.Println(
-					fmt.Sprintf("[GetTableInfo] Bad scanned COLUMN_NAME and DATA_TYPE from %v!\nError: %v", table, err.Error()),
-				)
+					fmt.Sprintf("[GetTableInfo] Bad scanned COLUMN_NAME and DATA_TYPE from %v! Error: %v",
+						table, err.Error(),
+					))
 
 				return nil, err
 			}
@@ -681,12 +803,19 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 				isKey = true
 			}
 
+			var null bool
+
+			if fieldNull == "YES" {
+				null = true
+			}
+
 			fieldInfo = append(
 				fieldInfo,
 				FieldInfo{
-					Name:  fieldName,
-					Type:  fieldType,
-					IsKey: isKey,
+					Name:       fieldName,
+					ColumnType: fieldType,
+					IsKey:      isKey,
+					CouldNull:  null,
 				},
 			)
 		}
@@ -695,11 +824,13 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 			tableInfo,
 			TableInfo{
 				Name:   table,
-				Id:     nameId,
+				ID:     nameId,
 				Fields: fieldInfo,
 			},
 		)
 	}
+
+	log.Println(tableInfo)
 
 	return tableInfo, nil
 }
@@ -707,16 +838,16 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 
 	handler := &Handler{
-		DB:   db,
-		Tmpl: template.Must(template.ParseGlob("templates/*")),
+		DB: db,
 	}
 
 	tableInfo, err := GetTablesInfo(db)
 
 	if err != nil {
 		log.Println(
-			fmt.Sprintf("[NewDBExplorer] Bad calling from [GetTablesInfo] function!\nError: %v", err.Error()),
-		)
+			fmt.Sprintf("[NewDBExplorer] Bad calling from [GetTablesInfo] function! Error: %v",
+				err.Error(),
+			))
 
 		return nil, err
 	}
@@ -726,11 +857,11 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	r := mux.NewRouter()
 
 	r.HandleFunc("/", handler.TableList).Methods("GET")
-	r.HandleFunc("/{table}/{id:[0-9]+}", handler.GetRecordById).Methods("GET")
-	r.HandleFunc("/{table}", handler.tableHandler).Methods("GET")
-	r.HandleFunc("/{table}", handler.CreateRecord).Methods("PUT")
+	r.HandleFunc("/{table}/{id:[0-9]+}", handler.SelectRecordByID).Methods("GET")
+	r.HandleFunc("/{table}/", handler.CreateRecord).Methods("PUT")
+	r.HandleFunc("/{table}", handler.SelectRecord).Methods("GET")
 	r.HandleFunc("/{table}/{id:[0-9]+}", handler.UpdateRecord).Methods("POST")
-	r.HandleFunc("/{table}/{id:[0-9]+}", handler.DeleteRecordById).Methods("DELETE")
+	r.HandleFunc("/{table}/{id:[0-9]+}", handler.DeleteRecord).Methods("DELETE")
 
 	return r, nil
 }
