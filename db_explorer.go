@@ -8,9 +8,11 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
-
-	"github.com/gorilla/mux"
 )
+
+var TypeInt = "int"
+var TypeText = "text"
+var TypeVarchar = "varchar(255)"
 
 type FieldInfo struct {
 	Name       string
@@ -30,20 +32,23 @@ type Handler struct {
 	Table []TableInfo
 }
 
+type Columns struct {
+	Field   string
+	Type    string
+	Null    string
+	Key     string
+	Default interface{}
+	Extra   string
+}
+
 // Хендлер для списка всех таблиц. Вызывается по эндпоинту "/" [GET]
-func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
+func (h *Handler) TableList(w http.ResponseWriter) {
 
-	ListTable, err := GetAllTables(h.DB)
+	tables := make([]string, 0)
 
-	if err != nil {
-		log.Fatal("[TableList] GET '/'.\n Error: ", err.Error())
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
+	for _, table := range h.Table {
+		tables = append(tables, table.Name)
 	}
-
-	tables := []string{}
-
-	tables = append(tables, ListTable...)
 
 	log.Println(tables)
 
@@ -56,7 +61,9 @@ func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		log.Println("Bad packed json")
+		log.Println("Bad packed json:", err.Error())
+		w.WriteHeader(http.StatusInternalServerError)
+		return
 	}
 
 	w.WriteHeader(http.StatusOK)
@@ -66,26 +73,45 @@ func (h *Handler) TableList(w http.ResponseWriter, r *http.Request) {
 	_, err = w.Write(result)
 
 	if err != nil {
-		log.Println("Bad request")
+		log.Println("Bad request:", err.Error())
 	}
 }
 
 // Хендлер для получния записи / записей по id. Вызывается по эндпоинту "/{table}/{id}" [GET]
 func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 
-	table := mux.Vars(r)["table"]
+	url := r.URL.Path
 
-	idx, err := CheckTableExist(w, h.Table, table, "GetRecordById")
+	params := strings.Split(url, "/")
+
+	table := params[1]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err2.Error())
+		}
+
+		return
+	}
 
 	if err != nil {
 		return
 	}
 
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	id, err := strconv.Atoi(params[2])
 
 	if err != nil {
 		log.Printf("[GetRecordById] GET '/%v/%v'. Bad converted id to int.\n Error: %v",
-			table, mux.Vars(r)["id"], err.Error())
+			table, id, err.Error())
 
 		w.WriteHeader(http.StatusBadRequest)
 		return
@@ -93,7 +119,7 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 
 	values := ColumnsType(h.Table[idx])
 
-	columns := GetColumnsTable(h.Table[idx], r, false)
+	columns := GetColumnsTable(h.Table[idx], false)
 
 	err = h.DB.
 		QueryRow(
@@ -104,19 +130,23 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 
 	if err != nil {
 		log.Printf("[GetRecordById] GET '/%v/%v'. Bad scanned to table %v. Error: %v",
-			h.Table[idx].Name, mux.Vars(r)["id"], table, err.Error())
+			h.Table[idx].Name, id, table, err.Error())
 
-		result, _ := json.Marshal(
+		result, err2 := json.Marshal(
 			map[string]string{
 				"error": "record not found",
 			})
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err.Error())
+		}
 
 		w.WriteHeader(http.StatusNotFound)
 		w.Header().Set("Content-Type", "application/json")
 		_, err = w.Write(result)
 
 		if err != nil {
-			log.Println("Bad request")
+			log.Println("Bad request: ", err.Error())
 		}
 
 		return
@@ -149,15 +179,32 @@ func (h *Handler) SelectRecordByID(w http.ResponseWriter, r *http.Request) {
 // Вызывается по эндпоинту "/{table}&offset=a&limit=b" [GET]
 func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 
-	table := mux.Vars(r)["table"]
+	url := r.URL.Path
 
-	idx, err := CheckTableExist(w, h.Table, table, "GetRecordById")
+	table := strings.Split(url, "/")[1]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err2.Error())
+		}
+
+		return
+	}
 
 	if err != nil {
 		return
 	}
 
-	limit := r.FormValue("limit")
+	limit := r.URL.Query().Get("limit")
 
 	if limit == "" {
 		limit = "5"
@@ -168,7 +215,7 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 		lim = 5
 	}
 
-	offset := r.FormValue("offset")
+	offset := r.URL.Query().Get("offset")
 
 	if offset == "" {
 		offset = "0"
@@ -181,7 +228,7 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 
 	values := ColumnsType(h.Table[idx])
 
-	columns := GetColumnsTable(h.Table[idx], r, false)
+	columns := GetColumnsTable(h.Table[idx], false)
 
 	log.Println("columns: ", columns)
 
@@ -249,9 +296,28 @@ func (h *Handler) SelectRecord(w http.ResponseWriter, r *http.Request) {
 // Вызывается по эндпоинту "/{table}" [PUT]
 func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 
-	table := mux.Vars(r)["table"]
+	url := r.URL.Path
 
-	idx, err := CheckTableExist(w, h.Table, table, "CreateRecord")
+	params := strings.Split(url, "/")
+
+	table := params[1]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err2.Error())
+		}
+
+		return
+	}
 
 	if err != nil {
 		return
@@ -264,11 +330,13 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 		_, err2 := w.Write([]byte(`{"error": "bad unpacked json"}`))
 
 		if err2 != nil {
-			log.Println("Bad request")
+			log.Println("Bad request:", err2.Error())
 		}
+
+		return
 	}
 
-	columns := GetColumnsTable(h.Table[idx], r, true)
+	columns := GetColumnsTable(h.Table[idx], true)
 
 	query := fmt.Sprintf(
 		"INSERT INTO %v (%v) VALUES (%v);",
@@ -294,7 +362,7 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	NameID := GetIdColumnName(h.Table[idx])
+	NameID := GetIDColumnName(h.Table[idx])
 
 	result, err := json.Marshal(
 		map[string]interface{}{
@@ -305,13 +373,13 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		log.Println("Bad packed json")
+		log.Println("Bad packed json:", err.Error())
 	}
 
 	_, err = w.Write(result)
 
 	if err != nil {
-		log.Println("Bad request")
+		log.Println("Bad request:", err.Error())
 	}
 
 	log.Println("Inserted ID:", LastID)
@@ -321,61 +389,80 @@ func (h *Handler) CreateRecord(w http.ResponseWriter, r *http.Request) {
 // Вызывается по эндпоинту "/{table}/{id}". [POST]
 func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 
-	table := mux.Vars(r)["table"]
+	url := r.URL.Path
 
-	idx, err := CheckTableExist(w, h.Table, table, "UpdateRecord")
+	params := strings.Split(url, "/")
+
+	table := params[1]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err2.Error())
+		}
+
+		return
+	}
 
 	if err != nil {
 		return
 	}
 
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	id, err := strconv.Atoi(params[2])
 
 	if err != nil {
 		log.Printf("[UpdateRecord] POST '/%v/%v'. Bad converted id to int. Error: %v",
-			table, mux.Vars(r)["id"], err.Error())
+			table, id, err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	ColumnIdName, placeholder, item, err := CheckParamsAndTypes(h.Table[idx], r)
+	columnIDName, placeholder, item, err := CheckParamsAndTypes(h.Table[idx], r)
 
 	if err != nil {
-		log.Printf("Cant update %s", ColumnIdName)
+		log.Printf("Cant update %s", columnIDName)
 
 		w.WriteHeader(http.StatusBadRequest)
 		_, err2 := w.Write(
 			[]byte(
-				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, ColumnIdName),
+				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, columnIDName),
 			),
 		)
 
 		if err2 != nil {
-			log.Println("Bad request")
+			log.Println("Bad request:", err2.Error())
 		}
 		return
 	}
 
-	if strings.Contains(placeholder, ColumnIdName) {
+	if strings.Contains(placeholder, columnIDName) {
 
-		log.Printf("Cant update %s", ColumnIdName)
+		log.Printf("Cant update %s", columnIDName)
 
 		w.WriteHeader(http.StatusBadRequest)
 		_, err2 := w.Write(
 			[]byte(
-				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, ColumnIdName),
+				fmt.Sprintf(`{"error" : "field %s have invalid type"}`, columnIDName),
 			),
 		)
 
 		if err2 != nil {
-			log.Println("Bad request")
+			log.Println("Bad request:", err2.Error())
 		}
 		return
 	}
 
 	query := fmt.Sprintf(
 		"UPDATE %v SET %v WHERE %v = %d",
-		h.Table[idx].Name, placeholder, ColumnIdName, id,
+		h.Table[idx].Name, placeholder, columnIDName, id,
 	)
 
 	log.Println(query)
@@ -407,13 +494,13 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 	)
 
 	if err != nil {
-		log.Println("Bad packed json")
+		log.Println("Bad packed json:", err.Error())
 	}
 
 	_, err = w.Write(result)
 
 	if err != nil {
-		log.Println("Bad request")
+		log.Println("Bad request:", err.Error())
 	}
 
 	log.Println("Row affected:", affected)
@@ -422,24 +509,43 @@ func (h *Handler) UpdateRecord(w http.ResponseWriter, r *http.Request) {
 // Хендлер для удлаения записи по ID. Вызывается по эндпоинту "/{table}/{id}". [DELETE]
 func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 
-	table := mux.Vars(r)["table"]
+	url := r.URL.Path
 
-	idx, err := CheckTableExist(w, h.Table, table, "DeleteRecord")
+	params := strings.Split(url, "/")
+
+	table := params[1]
+
+	cond, idx, err := contains(h.Table, table)
+
+	if !cond {
+
+		w.WriteHeader(http.StatusNotFound)
+		w.Header().Set("Content-Type", "application/json")
+		_, err2 := w.Write(
+			[]byte(`{"error" : "unknown table"}`),
+		)
+
+		if err2 != nil {
+			log.Println("Bad packed json:", err2.Error())
+		}
+
+		return
+	}
 
 	if err != nil {
 		return
 	}
 
-	id, err := strconv.Atoi(mux.Vars(r)["id"])
+	id, err := strconv.Atoi(params[2])
 
 	if err != nil {
 		log.Printf("[DeleteRecord] DELETE '/%v/%v'. Bad converted id to int. Error: %v",
-			table, mux.Vars(r)["id"], err.Error())
+			table, id, err.Error())
 		w.WriteHeader(http.StatusBadRequest)
 		return
 	}
 
-	NameID := GetIdColumnName(h.Table[idx])
+	NameID := GetIDColumnName(h.Table[idx])
 
 	query := fmt.Sprintf(
 		"DELETE FROM %v WHERE %v = %d", h.Table[idx].Name, NameID, id,
@@ -463,13 +569,17 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	result, _ := json.Marshal(
+	result, err := json.Marshal(
 		map[string]interface{}{
 			"response": map[string]int{
 				"deleted": int(affected),
 			},
 		},
 	)
+
+	if err != nil {
+		log.Println("Bad packed json:", err.Error())
+	}
 
 	log.Println(result)
 
@@ -478,12 +588,12 @@ func (h *Handler) DeleteRecord(w http.ResponseWriter, r *http.Request) {
 	_, err = w.Write(result)
 
 	if err != nil {
-		log.Println("Bad request")
+		log.Println("Bad request:", err.Error())
 	}
 }
 
 // Возвращаем имя столбца, который явл. ID
-func GetIdColumnName(table TableInfo) string {
+func GetIDColumnName(table TableInfo) string {
 
 	for _, field := range table.Fields {
 
@@ -493,32 +603,6 @@ func GetIdColumnName(table TableInfo) string {
 	}
 
 	return ""
-}
-
-// Проверка наличия таблицы в БД и отправка ошибки
-func CheckTableExist(w http.ResponseWriter, tableInfo []TableInfo, table string, funcName string) (int, error) {
-
-	cond, idx, err := contains(tableInfo, table)
-
-	if !cond {
-
-		w.WriteHeader(http.StatusNotFound)
-		w.Header().Set("Content-Type", "application/json")
-		_, err2 := w.Write(
-			[]byte(`{"error" : "unknown table"}`),
-		)
-
-		if err2 != nil {
-			log.Panicln("Bad packed json")
-		}
-
-		log.Printf("[%s] Bad table in endpoint! Table %v is not exist!\nError: %v",
-			funcName, table, err.Error())
-
-		return -1, err
-	}
-
-	return idx, nil
 }
 
 // Проверка наличия конкретной таблицы
@@ -535,7 +619,7 @@ func contains(s []TableInfo, table string) (bool, int, error) {
 }
 
 // Смотрим имена столбцов в таблице
-func GetColumnsTable(table TableInfo, r *http.Request, key bool) string {
+func GetColumnsTable(table TableInfo, key bool) string {
 
 	columns := make([]string, 0)
 
@@ -564,8 +648,8 @@ func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, strin
 	err := decoder.Decode(&param)
 
 	if err != nil {
-		log.Println("Bad decode json data")
-		return make([]interface{}, 0), "", fmt.Errorf("Bad decode json")
+		log.Println("Bad decode json data: ", err.Error())
+		return make([]interface{}, 0), "", err
 	}
 
 	for _, field := range table.Fields {
@@ -581,9 +665,9 @@ func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, strin
 				item = append(item, nil)
 			} else {
 				switch field.ColumnType {
-				case "int":
+				case TypeInt:
 					item = append(item, 0)
-				case "varchar", "text":
+				case TypeVarchar, TypeText:
 					item = append(item, "")
 				}
 			}
@@ -598,7 +682,7 @@ func MakeContainerInsert(table TableInfo, r *http.Request) ([]interface{}, strin
 // Проверка типов параметров, которые пришли в реквесте. Делаем placeholders
 func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []interface{}, error) {
 
-	var columnIdName string
+	var columnIDName string
 
 	item := make([]interface{}, 0)
 	placeholder := make([]string, 0)
@@ -609,13 +693,13 @@ func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []in
 
 	if err != nil {
 		log.Println("Bad decode json data")
-		return "", "", make([]interface{}, 0), fmt.Errorf("Bad decode json")
+		return "", "", make([]interface{}, 0), err
 	}
 
 	for _, field := range table.Fields {
 
 		if field.IsKey {
-			columnIdName = field.Name
+			columnIDName = field.Name
 			break
 		}
 	}
@@ -634,12 +718,12 @@ func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []in
 
 				case string:
 
-					if field.ColumnType != "varchar" && field.ColumnType != "text" {
+					if field.ColumnType != TypeVarchar && field.ColumnType != TypeText {
 						return field.Name, "", make([]interface{}, 0), fmt.Errorf("%s column cant use this type", field.Name)
 					}
 
 				case float64:
-					if field.ColumnType != "int" {
+					if field.ColumnType != TypeInt {
 						return field.Name, "", make([]interface{}, 0), fmt.Errorf("%s column cant use this type", field.Name)
 					}
 				}
@@ -651,7 +735,7 @@ func CheckParamsAndTypes(table TableInfo, r *http.Request) (string, string, []in
 		placeholder = append(placeholder, fmt.Sprintf("%v = ?", key))
 	}
 
-	return columnIdName, strings.Join(placeholder, ","), item, nil
+	return columnIDName, strings.Join(placeholder, ","), item, nil
 }
 
 // Возвращаем интерфейс с подготовленными типами для
@@ -662,9 +746,9 @@ func ColumnsType(table TableInfo) []interface{} {
 
 	for i, field := range table.Fields {
 		switch field.ColumnType {
-		case "int":
+		case TypeInt:
 			values[i] = new(sql.NullInt64)
-		case "varchar", "text":
+		case TypeVarchar, TypeText:
 			values[i] = new(sql.NullString)
 		}
 	}
@@ -672,33 +756,29 @@ func ColumnsType(table TableInfo) []interface{} {
 	return values
 }
 
-// Делаем каст к гошным типам
+// Делаем каст
 func CastType(record []interface{}, table TableInfo) map[string]interface{} {
 
 	item := make(map[string]interface{}, len(record))
 
 	for idx, value := range record {
 
-		switch value.(type) {
-
-		case *sql.NullString:
-			if v, ok := value.(*sql.NullString); ok {
-				if v.Valid {
-					item[table.Fields[idx].Name] = v.String
-				} else {
-					item[table.Fields[idx].Name] = nil
-				}
-			}
-
-		case *sql.NullInt64:
-			if v, ok := value.(*sql.NullInt64); ok {
-				if v.Valid {
-					item[table.Fields[idx].Name] = v.Int64
-				} else {
-					item[table.Fields[idx].Name] = nil
-				}
+		if v, ok := value.(*sql.NullString); ok {
+			if v.Valid {
+				item[table.Fields[idx].Name] = v.String
+			} else {
+				item[table.Fields[idx].Name] = nil
 			}
 		}
+
+		if v, ok := value.(*sql.NullInt64); ok {
+			if v.Valid {
+				item[table.Fields[idx].Name] = v.Int64
+			} else {
+				item[table.Fields[idx].Name] = nil
+			}
+		}
+
 	}
 	return item
 }
@@ -706,23 +786,16 @@ func CastType(record []interface{}, table TableInfo) map[string]interface{} {
 // Информация о все таблицах в БД
 func GetAllTables(db *sql.DB) ([]string, error) {
 
-	ListTable := make([]string, 0)
+	tables := make([]string, 0)
 
 	// make request to db. Get all tables name
-	rows, err := db.Query(`
-		SELECT
-			Table_name
-		FROM
-			information_schema.tables
-		WHERE
-			table_schema = 'golang';`)
+	rows, err := db.Query(`SHOW TABLES;`)
 
-	//auto close after returns
+	// auto close after returns
 	defer rows.Close() //nolint:staticcheck
 
 	if err != nil {
-		log.Fatal("[GetAllTables] Bad query to db!\nError: ", err.Error())
-		return ListTable, err
+		return tables, err
 	}
 
 	// iteration over returned query from db and read data
@@ -733,14 +806,13 @@ func GetAllTables(db *sql.DB) ([]string, error) {
 		err = rows.Scan(&table)
 
 		if err != nil {
-			log.Fatal("[TableList] Bad scanned table name!\nError: ", err.Error())
 			return make([]string, 0), err
 		}
 
-		ListTable = append(ListTable, table)
+		tables = append(tables, table)
 	}
 
-	return ListTable, nil
+	return tables, nil
 }
 
 // Получение информации о всех столбцах таблицы
@@ -748,95 +820,53 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 
 	tableInfo := []TableInfo{}
 
-	ListTable, err := GetAllTables(db)
+	tables, err := GetAllTables(db)
 
 	if err != nil {
-		log.Printf("[GetTableInfo]. Bad calling from [GetAllTables] function! Error: %v",
-			err.Error())
-
 		return nil, err
 	}
 
-	for _, table := range ListTable {
+	for _, table := range tables {
 
 		fieldInfo := []FieldInfo{}
 
-		var nameId string
+		var nameID string
 
-		row := db.QueryRow(
-			fmt.Sprintf(
-				`SELECT
-				   	COLUMN_NAME 
-				 FROM
-				   	INFORMATION_SCHEMA.COLUMNS
-				 WHERE
-				 	TABLE_SCHEMA = 'golang' AND
-					TABLE_NAME = '%s' AND
-					COLUMN_KEY = 'PRI'`,
-				table,
-			),
-		)
-
-		err := row.Scan(&nameId)
-
-		if err != nil {
-			log.Printf("[GetTableInfo] Bad scanned column id from table %v. Error: %v",
-				table, err.Error())
-			return nil, err
-		}
-
-		// make query for getting column name and column type into $table
 		rows, err := db.Query(
-			fmt.Sprintf(
-				`SELECT
-					COLUMN_NAME, DATA_TYPE , IS_NULLABLE
-		  		 FROM
-					INFORMATION_SCHEMA.COLUMNS 
-		  		 WHERE
-					TABLE_SCHEMA = 'golang' AND
-					TABLE_NAME = '%s'`,
-				table,
-			),
+			fmt.Sprintf(`SHOW COLUMNS FROM %s`, table),
 		)
 
 		if err != nil {
-			log.Printf("[GetTableInfo] Bad query to table %v. COLUMN_NAME, DATA_TYPE, IS_NULLABLE! Error: %v",
-				table, err.Error())
-
 			return nil, err
 		}
+
+		col := Columns{}
 
 		for rows.Next() {
 
-			var fieldName string = ""
-			var fieldType string = ""
-			var fieldNull string = ""
-			var isKey bool = false
+			var null bool
+			var isKey bool
 
-			err = rows.Scan(&fieldName, &fieldType, &fieldNull)
+			err = rows.Scan(&col.Field, &col.Type, &col.Null, &col.Key, &col.Default, &col.Extra)
 
 			if err != nil {
-				log.Printf("[GetTableInfo] Bad scanned COLUMN_NAME and DATA_TYPE from %v! Error: %v",
-					table, err.Error())
-
 				return nil, err
 			}
 
-			if fieldName == nameId {
+			if col.Key == "PRI" {
 				isKey = true
+				nameID = col.Field
 			}
 
-			var null bool
-
-			if fieldNull == "YES" {
+			if col.Null == "YES" {
 				null = true
 			}
 
 			fieldInfo = append(
 				fieldInfo,
 				FieldInfo{
-					Name:       fieldName,
-					ColumnType: fieldType,
+					Name:       col.Field,
+					ColumnType: col.Type,
 					IsKey:      isKey,
 					CouldNull:  null,
 				},
@@ -847,7 +877,7 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 			tableInfo,
 			TableInfo{
 				Name:   table,
-				ID:     nameId,
+				ID:     nameID,
 				Fields: fieldInfo,
 			},
 		)
@@ -856,6 +886,69 @@ func GetTablesInfo(db *sql.DB) ([]TableInfo, error) {
 	log.Println(tableInfo)
 
 	return tableInfo, nil
+}
+
+func URLLength(url string) int {
+
+	count := 0
+
+	if url == "/" {
+		count = 0
+	} else {
+
+		split := strings.Split(url, "/")
+
+		for _, item := range split {
+			if item != "" {
+				count++
+			}
+		}
+	}
+
+	return count
+}
+
+func (h *Handler) mainHandler(w http.ResponseWriter, r *http.Request) {
+
+	url := r.URL.Path
+	lenurl := URLLength(url)
+
+	switch r.Method {
+
+	case "GET":
+		switch lenurl {
+
+		case 0:
+			h.TableList(w)
+		case 1:
+			h.SelectRecord(w, r)
+		case 2:
+			h.SelectRecordByID(w, r)
+		default:
+			w.WriteHeader(http.StatusBadGateway)
+			w.Header().Set("Content-Type", "application/json")
+			_, err := w.Write([]byte(`{"error" : "error way"}`))
+
+			if err != nil {
+				log.Println("Bad request:", err.Error())
+			}
+		}
+
+	case "PUT":
+		h.CreateRecord(w, r)
+	case "POST":
+		h.UpdateRecord(w, r)
+	case "DELETE":
+		h.DeleteRecord(w, r)
+	default:
+		w.WriteHeader(http.StatusMethodNotAllowed)
+		w.Header().Set("Content-Type", "application/json")
+		_, err := w.Write([]byte(`{"error" : "error method"}`))
+
+		if err != nil {
+			log.Println("Bad request:", err.Error())
+		}
+	}
 }
 
 func NewDBExplorer(db *sql.DB) (http.Handler, error) {
@@ -867,22 +960,14 @@ func NewDBExplorer(db *sql.DB) (http.Handler, error) {
 	tableInfo, err := GetTablesInfo(db)
 
 	if err != nil {
-		log.Printf("[NewDBExplorer] Bad calling from [GetTablesInfo] function! Error: %v",
-			err.Error())
-
 		return nil, err
 	}
 
 	handler.Table = tableInfo
 
-	r := mux.NewRouter()
+	mux := http.NewServeMux()
 
-	r.HandleFunc("/", handler.TableList).Methods("GET")
-	r.HandleFunc("/{table}/{id:[0-9]+}", handler.SelectRecordByID).Methods("GET")
-	r.HandleFunc("/{table}/", handler.CreateRecord).Methods("PUT")
-	r.HandleFunc("/{table}", handler.SelectRecord).Methods("GET")
-	r.HandleFunc("/{table}/{id:[0-9]+}", handler.UpdateRecord).Methods("POST")
-	r.HandleFunc("/{table}/{id:[0-9]+}", handler.DeleteRecord).Methods("DELETE")
+	mux.HandleFunc("/", handler.mainHandler)
 
-	return r, nil
+	return mux, nil
 }

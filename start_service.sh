@@ -1,10 +1,34 @@
+#!/bin/bash
+
+function ProgressBar {
+
+    let _progress=(${1}*100/${2}*100)/100
+    let _done=(${_progress}*4)/10
+    let _left=40-$_done
+
+    _fill=$(printf "%${_done}s")
+    _empty=$(printf "%${_left}s")
+
+printf "\rProgress : [${_fill// /#}${_empty// /-}] ${_progress}%%"
+
+}
+
 echo "Start docker container"
 
-docker run -p 3306:3306 -v /home/d3vyatk4ru/Desktop/lectures-2022-2/06_databases/99_hw/db/_sql:/docker-entrypoint-initdb.d \
--e MYSQL_ROOT_PASSWORD=1234 \
--e MYSQL_DATABASE=golang \
--d mysql
+docker-compose up -d
 
-docker exec -it mysql-server-db "bash"
+echo "Waiting 150 seconds for container setting"
 
-mysql -u root -ppassword 1234 < docker-entrypoint-initdb.d/sample_db.sql 
+_start=1
+
+_end=100
+
+for number in $(seq ${_start} ${_end})
+do
+    sleep 1.5
+    ProgressBar ${number} ${_end}
+done
+
+printf "\nTime is over!!!\n"
+
+go test -v
